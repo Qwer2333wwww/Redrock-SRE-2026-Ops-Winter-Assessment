@@ -12,10 +12,6 @@ GATEWAY="172.22.146.1"
 DNS1="172.22.146.53"
 DNS2="172.22.146.54"
 
-# 内网网段
-LOCAL_NETWORK="172.22.146.0/24"
-INTERNAL_NETWORK="172.16.0.0/12"
-
 # 文件路径
 LOG_FILE="/var/log/network_config.log"
 BACKUP_DIR="/var/backup/network"
