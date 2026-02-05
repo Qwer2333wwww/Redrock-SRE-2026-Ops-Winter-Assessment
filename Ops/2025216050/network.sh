@@ -35,21 +35,26 @@ backup_config() {
     mkdir -p "$BACKUP_DIR"
     local timestamp
     timestamp=$(date +"%Y%m%d_%H%M%S")
-
-    # 备份当前 IP 配置
-    ip addr show "$ETH_DEV" > "$BACKUP_DIR/ip_addr_$timestamp.bak"
     
-    # 备份当前路由表
-    ip route show > "$BACKUP_DIR/ip_route_$timestamp.bak"
-
-    # 备份当前 DNS 配置
+    ip addr show "$ETH_DEV" > "$BACKUP_DIR/ip_addr_$timestamp.bak" 2>&1
+    if [ ! -s "$BACKUP_DIR/ip_addr_$timestamp.bak" ]; then
+        log "WARNING" "IP 备份为空(exit=$?), 回滚可能无法恢复 IP"
+    fi
+    
+    ip route show > "$BACKUP_DIR/ip_route_$timestamp.bak" 2>&1
+    if [ ! -s "$BACKUP_DIR/ip_route_$timestamp.bak" ]; then
+        log "WARNING" "路由备份为空(exit=$?), 回滚可能无法恢复路由"
+    fi
+   
     if [ -f "$RESOLV_FILE" ]; then
         cp "$RESOLV_FILE" "$BACKUP_DIR/resolv_$timestamp.bak"
     else
         : > "$BACKUP_DIR/resolv_$timestamp.bak"
     fi
-    
-    # 记录当前模式
+    if [ ! -s "$BACKUP_DIR/resolv_$timestamp.bak" ]; then
+        log "WARNING" "DNS 备份为空，回滚可能无法恢复 DNS"
+    fi
+   
     if pgrep dhclient > /dev/null; then
         echo "dhcp" > "$BACKUP_DIR/mode_$timestamp.bak"
     else
@@ -110,7 +115,9 @@ rollback() {
     selection=$(select_backup "$1") || exit 1
 
     local timestamp
-    timestamp=${selection##*_}
+    local base
+    base=$(basename "$selection")
+    timestamp=${base#mode_}
     timestamp=${timestamp%.bak}
 
     local mode_file="$selection"
@@ -135,27 +142,30 @@ select_backup() {
         return 1
     fi
 
-    echo "可用备份列表 (最新在前):"
+    if [ -n "$preset" ]; then
+        if ! [[ "$preset" =~ ^[0-9]+$ ]]; then
+            log "ERROR" "无效的备份序号: $preset"
+            return 1
+        fi
+        if [ "$preset" -lt 1 ] || [ "$preset" -gt ${#backups[@]} ]; then
+            log "ERROR" "备份序号超出范围: $preset"
+            return 1
+        fi
+        echo "${backups[$((preset - 1))]}"
+        return 0
+    fi
+
+    echo "可用备份列表 (最新在前):" >&2
     local idx=1
     for f in "${backups[@]}"; do
         local ts
         ts=${f##*_}
         ts=${ts%.bak}
-        echo "  [$idx] $ts ($f)"
+        echo "  [$idx] $ts ($f)" >&2
         idx=$((idx + 1))
     done
 
-    if [ -n "$preset" ]; then
-        if ! [[ "$preset" =~ ^[0-9]+$ ]] || [ "$preset" -lt 1 ] || [ "$preset" -gt ${#backups[@]} ]; then
-            log "ERROR" "无效的备份序号: $preset"
-            return 1
-        fi
-        echo "选择序号: $preset"
-        echo "${backups[$((preset - 1))]}"
-        return 0
-    fi
-
-    read -p "请选择要回滚的序号 [1]: " choice
+    read -p "请选择要回滚的序号: " choice
     if [ -z "$choice" ]; then
         choice=1
     fi
@@ -185,6 +195,12 @@ restore_network() {
             /^[0-9]+: / {iface=$2; sub(":", "", iface)}
             iface==dev && /inet / {print $2; exit}
         ' "$ip_backup")
+        if [ -z "$ip_cidr" ]; then
+            ip_cidr=$(awk '/inet / {print $2; exit}' "$ip_backup")
+            [ -n "$ip_cidr" ] && log "INFO" "IP 未匹配网卡 $ETH_DEV，使用备份中的首个 IPv4: $ip_cidr"
+        fi
+    else
+        log "WARNING" "未找到 IP 备份文件，跳过 IP 恢复"
     fi
 
     if [ -n "$ip_cidr" ]; then
@@ -192,6 +208,21 @@ restore_network() {
         ip link set "$ETH_DEV" up
     else
         log "WARNING" "未在备份中找到 IP，跳过 IP 恢复"
+    fi
+    
+    if [ -z "$ip_cidr" ]; then
+        if [ "$mode" = "dhcp" ]; then
+            log "INFO" "备份无 IP，按 dhcp 模式兜底续租"
+            dhclient "$ETH_DEV"
+        else
+            log "INFO" "备份无 IP，按静态配置兜底"
+            ip addr add "$STATIC_IP/$NETMASK" dev "$ETH_DEV" 2>/dev/null || true
+            ip link set "$ETH_DEV" up
+            ip route del default 2>/dev/null
+            ip route add default via "$GATEWAY" dev "$ETH_DEV" 2>/dev/null || true
+            [ -L "$RESOLV_FILE" ] && rm -f "$RESOLV_FILE"
+            echo -e "nameserver $DNS1\nnameserver $DNS2" > "$RESOLV_FILE"
+        fi
     fi
 
     if [ -f "$route_backup" ]; then
