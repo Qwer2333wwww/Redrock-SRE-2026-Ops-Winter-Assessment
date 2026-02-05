@@ -22,14 +22,15 @@ BACKUP_DIR="/var/backup/network"
 RESOLV_FILE="/etc/resolv.conf"
 
 log() {
-    TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
-    echo "[$TIMESTAMP] $1" >> "$LOG_FILE"
-    echo "[$TIMESTAMP] $1"
+    local level="$1"
+    local message="$2"
+    local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+    echo "[$timestamp] [$level] $message" | tee -a "$LOG_FILE"
 }
 
 check_root() {
     if [ "$EUID" -ne 0 ]; then
-        log "请使用 root 权限运行此脚本"
+        log "ERROR" "请使用 root 权限运行此脚本"
         exit 1
     fi
 }
@@ -54,22 +55,23 @@ backup_config() {
         echo "static" > "$BACKUP_DIR/mode_$TIMESTAMP.bak"
     fi
 
-    log "[info] 已备份当前网络配置到 $BACKUP_DIR"
+    log "INFO" "已备份当前网络配置到 $BACKUP_DIR"
 }
 
 configure_dhcp() {
-    log "[info] 配置网络为 DHCP 模式"
+    log "INFO" "配置网络为 DHCP 模式"
  
-    pkill dhclient
+    pkill dhclient 2>/dev/null
     sleep 2
     ip addr flush dev "$ETH_DEV"
     
     dhclient "$ETH_DEV"
+    sleep 3
 
-    if [ $? -eq 0 ]; then
-        log "[info] DHCP 配置成功"
+    if ip addr show "$ETH_DEV" | grep -q "inet "; then
+        log "INFO" "DHCP 配置成功"
     else
-        log "[error] DHCP 配置失败"
+        log "ERROR" "DHCP 配置失败"
     fi
     
     ip addr show "$ETH_DEV" >> "$LOG_FILE"
@@ -77,21 +79,25 @@ configure_dhcp() {
 }
 
 configure_static() {
-    log "[info] 配置网络为静态 IP 模式"
+    log "INFO" "配置网络为静态 IP 模式"
     
-    pkill dhclient
+    pkill dhclient 2>/dev/null
     sleep 2
     ip addr flush dev "$ETH_DEV"
 
     ip addr add "$STATIC_IP/$NETMASK" dev "$ETH_DEV"
     ip link set "$ETH_DEV" up
+    
+    ip route del default 2>/dev/null
     ip route add default via "$GATEWAY" dev "$ETH_DEV"
+    
+    [ -L "$RESOLV_FILE" ] && rm -f "$RESOLV_FILE"
     echo -e "nameserver $DNS1\nnameserver $DNS2" > "$RESOLV_FILE"
     
     if ip addr show "$ETH_DEV" | grep -q "$STATIC_IP"; then
-        log "[info] 静态 IP 配置成功"
+        log "INFO" "静态 IP 配置成功"
     else
-        log "[error] 静态 IP 配置失败"
+        log "ERROR" "静态 IP 配置失败"
     fi
     
     ip addr show "$ETH_DEV" >> "$LOG_FILE"
@@ -99,14 +105,14 @@ configure_static() {
 }
 
 rollback() {
-    LATEST_BACKUP=$(ls -t "$BACKUP_DIR"/mode_*.bak | head -n 1)
+    LATEST_BACKUP=$(ls -t "$BACKUP_DIR"/mode_*.bak 2>/dev/null | head -n 1)
     if [ -z "$LATEST_BACKUP" ]; then
-        log "[error] 未找到备份文件，无法回滚"
+        log "ERROR" "未找到备份文件，无法回滚"
         exit 1
     fi
 
     MODE=$(cat "$LATEST_BACKUP")
-    log "[info] 回滚到上次配置模式: $MODE"
+    log "INFO" "回滚到上次配置模式: $MODE"
 
     if [ "$MODE" == "dhcp" ]; then
         configure_dhcp
@@ -132,13 +138,14 @@ EOF
 
 main() {
     check_root
-    backup_config
-
+    
     case "$1" in
         dhcp)
+            backup_config
             configure_dhcp
             ;;
         static)
+            backup_config
             configure_static
             ;;
         rollback)
