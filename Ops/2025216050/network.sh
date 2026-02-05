@@ -26,7 +26,7 @@ log() {
 
 check_root() {
     if [ "$EUID" -ne 0 ]; then
-        log "ERROR" "请使用 root 权限运行此脚本"
+        echo "请使用 root 权限运行此脚本"
         exit 1
     fi
 }
